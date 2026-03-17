@@ -195,4 +195,4 @@ src/info.h:
 	@sed -n -e "$A,$B p" -e "$B q" README.md > help_msg
 	@utils/txt2cvar.py help_msg > src/info.h
 	@rm help_msg
-	@echo "const char version[] = {\""`git describe --tags 2>/dev/null || echo 0.0.0`\""};" >> src/info.h
+	@echo "const char version[] = {\""`git describe --tags 2>/dev/null || echo 0.0.0-starless`\""};" >> src/info.h
