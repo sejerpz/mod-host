@@ -1198,7 +1198,7 @@ int main(int argc, char **argv)
             case 'V':
                 printf(
                     "%s version: %s\n"
-                    "source code: https://github.com/sejerpz/mod-host\n",
+                    "source code: https://github.com/sejerpz/mod-host\n"
                     "original source code: https://github.com/moddevices/mod-host\n",
                 argv[0], version);
 
