@@ -55,7 +55,7 @@ typedef unsigned int uint;
 #include <dlfcn.h>
 #endif
 
-#if defined(_DARKGLASS_DEVICE_PABLITO)
+#if defined(_MOD_DEVICE_RK358x)
 #include <sys/resource.h>
 #elif defined(_MOD_DEVICE_DUO) || defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF)
 #include <sys/resource.h>
@@ -98,7 +98,7 @@ typedef unsigned int uint;
 #include "lv2/mod-license.h"
 
 // do not enable external-ui support in embed targets
-#if !(defined(_DARKGLASS_DEVICE_PABLITO) || defined(_MOD_DEVICE_DUO) || defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF))
+#if !(defined(_MOD_DEVICE_RK358x) || defined(_MOD_DEVICE_DUO) || defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF))
 #define WITH_EXTERNAL_UI_SUPPORT
 #endif
 
@@ -305,7 +305,8 @@ enum PostPonedEventType {
     POSTPONED_MIDI_PROGRAM_CHANGE,
     POSTPONED_MIDI_MAP,
     POSTPONED_TRANSPORT,
-    POSTPONED_JACK_MIDI_CONNECT,
+    POSTPONED_JACK_MIDI_CONNECT_IN,
+    POSTPONED_JACK_MIDI_CONNECT_OUT,
     POSTPONED_LOG_TRACE, // stack allocated, rt-safe
     POSTPONED_LOG_MESSAGE, // heap allocated
     POSTPONED_PROCESS_OUTPUT_BUFFER
@@ -588,12 +589,13 @@ typedef struct URIDS_T {
 
 typedef struct MIDI_CC_T {
     int8_t channel;
-    uint8_t controller;
+    uint16_t controller;    // if high bit set then controller is an nrpn
     float minimum;
     float maximum;
     int effect_id;
     const char* symbol;
     port_t* port;
+    int16_t midiOutValue;
 } midi_cc_t;
 
 typedef struct ASSIGNMENT_T {
@@ -795,6 +797,7 @@ static audio_monitor_t *g_audio_monitors;
 static pthread_mutex_t g_audio_monitor_mutex;
 static int g_audio_monitor_count;
 static jack_port_t *g_midi_in_port;
+static jack_port_t *g_midi_out_port;
 static jack_position_t g_jack_pos;
 static bool g_jack_rolling;
 static uint32_t g_jack_xruns;
@@ -805,6 +808,12 @@ static volatile enum TransportSyncMode g_transport_sync_mode;
 static bool g_aggregated_midi_enabled;
 static bool g_processing_enabled;
 static bool g_verbose_debug;
+static bool g_enable_midi_feedback;
+static bool g_enable_midi_feedback_sync;
+static bool g_enable_nrpn;
+
+static uint16_t  g_nrpn_param_num;
+static uint16_t  g_nrpn_param_value;
 static bool g_cpu_load_enabled;
 static volatile bool g_cpu_load_trigger;
 
@@ -913,7 +922,7 @@ static const char* const g_rolling_port_symbol = ROLLING_PORT_SYMBOL;
 *           LOCAL FUNCTION PROTOTYPES
 ************************************************************************************************************************
 */
-
+static void SetMidiOutValue(midi_cc_t *midiCC);
 static void InstanceDelete(int effect_id);
 static int InstanceExist(int effect_id);
 static void AllocatePortBuffers(effect_t* effect, int in_size, int out_size);
@@ -1055,6 +1064,42 @@ static char* _realpath(const char *name, char *resolved)
 #define realpath _realpath
 #endif
 
+#ifdef ENABLE_TMP_LOG
+static void Log(const char *psFormatString, ...)
+{
+    static FILE *pFile = NULL;
+    static char logStr[2048];
+
+    if(pFile == NULL)
+    {
+        pFile = fopen("/tmp/mod.log", "a");
+    }
+    
+	va_list args;
+	va_start(args, psFormatString);
+
+    vsnprintf(logStr, 2048, psFormatString, args);
+
+    fputs(logStr, pFile);
+
+    fflush(pFile);
+}
+#endif
+
+static void SetMidiOutValue(midi_cc_t *midiCC)
+{
+    float value = *(midiCC->port->buffer);
+
+    float fRange = midiCC->maximum - midiCC->minimum;
+    float fNormal = (value - midiCC->minimum) / fRange;
+
+    // if high bit is set controller is an nrpn with 14 bit value
+    if(midiCC->controller & 0x8000)
+        midiCC->midiOutValue = fNormal * 16383;
+    else
+        midiCC->midiOutValue = fNormal * 127;
+}
+
 static void InstanceDelete(int effect_id)
 {
     if (INSTANCE_IS_VALID(effect_id))
@@ -1180,13 +1225,25 @@ static void PortRegistration(jack_port_id_t port_id, int reg, void* data)
         return;
 
     /* port flags to connect to */
-    static const int target_port_flags = JackPortIsTerminal|JackPortIsPhysical|JackPortIsOutput;
+    static const int target_port_flags_out = JackPortIsTerminal|JackPortIsPhysical|JackPortIsOutput;
+    static const int target_port_flags_in  = JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput;
 
     const jack_port_t* const port = jack_port_by_id(g_jack_global_client, port_id);
 
-    if ((jack_port_flags(port) & target_port_flags) != target_port_flags)
+    if (((jack_port_flags(port) & target_port_flags_out) != target_port_flags_out) && ((jack_port_flags(port) & target_port_flags_in) != target_port_flags_in))
         return;
+
     if (strcmp(jack_port_type(port), JACK_DEFAULT_MIDI_TYPE) != 0)
+        return;
+		
+	
+    enum PostPonedEventType eventType;
+    
+    if ((jack_port_flags(port) & target_port_flags_out) == target_port_flags_out)
+        eventType = POSTPONED_JACK_MIDI_CONNECT_OUT;
+    else if ((jack_port_flags(port) & target_port_flags_in) == target_port_flags_in)
+        eventType = POSTPONED_JACK_MIDI_CONNECT_IN;
+    else
         return;
 
     postponed_event_list_data* const posteventptr = rtsafe_memory_pool_allocate_atomic(g_rtsafe_mem_pool);
@@ -1194,7 +1251,7 @@ static void PortRegistration(jack_port_id_t port_id, int reg, void* data)
     if (posteventptr == NULL)
         return;
 
-    posteventptr->event.type = POSTPONED_JACK_MIDI_CONNECT;
+    posteventptr->event.type = eventType;
     posteventptr->event.jack_midi_connect.port = port_id;
 
     pthread_mutex_lock(&g_rtsafe_mutex);
@@ -1389,7 +1446,7 @@ static void RunPostPonedEvents(int ignored_effect_id)
         }
 #endif
 
-        if (got_only_jack_midi_requests && eventptr->event.type != POSTPONED_JACK_MIDI_CONNECT)
+        if (got_only_jack_midi_requests && !(eventptr->event.type == POSTPONED_JACK_MIDI_CONNECT_OUT || eventptr->event.type == POSTPONED_JACK_MIDI_CONNECT_IN))
             got_only_jack_midi_requests = false;
 
         switch (eventptr->event.type)
@@ -1518,7 +1575,7 @@ static void RunPostPonedEvents(int ignored_effect_id)
             got_transport = true;
             break;
 
-        case POSTPONED_JACK_MIDI_CONNECT:
+        case POSTPONED_JACK_MIDI_CONNECT_OUT:
             if (g_jack_global_client != NULL) {
                 const jack_port_id_t port_id = eventptr->event.jack_midi_connect.port;
                 const jack_port_t *const port = jack_port_by_id(g_jack_global_client, port_id);
@@ -1541,6 +1598,21 @@ static void RunPostPonedEvents(int ignored_effect_id)
                 }
             }
             break;
+
+        case POSTPONED_JACK_MIDI_CONNECT_IN:
+            if(g_enable_midi_feedback && g_jack_global_client != NULL) {
+                const jack_port_id_t port_id = eventptr->event.jack_midi_connect.port;
+                const jack_port_t *const port = jack_port_by_id(g_jack_global_client, port_id);
+
+                if (port != NULL) {
+                    if(g_midi_out_port != NULL)
+                    {
+                        jack_connect(g_jack_global_client,  jack_port_name(g_midi_out_port), jack_port_name(port));
+                    }
+                }
+            }
+            break;
+
 
         case POSTPONED_PROCESS_OUTPUT_BUFFER:
             if (eventptr->event.process_out_buf.effect_id == ignored_effect_id)
@@ -1817,7 +1889,7 @@ static void RunPostPonedEvents(int ignored_effect_id)
 
 static void* PostPonedEventsThread(void* arg)
 {
-#if defined(_DARKGLASS_DEVICE_PABLITO)
+#if defined(_MOD_DEVICE_RK358x)
     setpriority(PRIO_PROCESS, gettid(), -18);
 #elif defined(_MOD_DEVICE_DUO) || defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF)
     const pid_t tid = syscall(SYS_gettid);
@@ -2713,7 +2785,8 @@ static bool UpdateGlobalJackPosition(enum UpdatePositionFlag flag, bool do_post)
 static int ProcessGlobalClient(jack_nframes_t nframes, void *arg)
 {
     jack_midi_event_t event;
-    uint8_t channel, controller;
+    uint8_t channel;
+    uint16_t controller;
     uint8_t status_nibble;
     uint16_t mvalue;
     float value;
@@ -2745,7 +2818,62 @@ static int ProcessGlobalClient(jack_nframes_t nframes, void *arg)
         }
     }
 #endif
+    // If midi feedback is enabled send any cc messages out to midi
+    if(g_enable_midi_feedback)
+    {
+        void *buf = jack_port_get_buffer(g_midi_out_port, nframes);
+        if (buf != NULL)
+        {
+            jack_midi_clear_buffer(buf);
+            bool error_sending = false;
 
+            for (int j = 0; j < MAX_MIDI_CC_ASSIGN; j++)
+            {
+                if (g_midi_cc_list[j].effect_id == ASSIGNMENT_NULL)
+                    break;
+                if (g_midi_cc_list[j].effect_id == ASSIGNMENT_UNUSED)
+                    continue;
+                if (g_midi_cc_list[j].midiOutValue >= 0)
+                {
+                    if(g_midi_cc_list[j].controller & 0x8000)
+                    {
+                        if(g_enable_nrpn)
+                        {
+                            // the controller is an nrpn, send 4 events for the nrpn
+                            uint16_t controller = g_midi_cc_list[j].controller & 0x7FFF;
+
+                            jack_midi_data_t ccs[4] = {99, 98, 6, 38};
+                            jack_midi_data_t data[4] = {controller >> 7, controller & 0x007F, g_midi_cc_list[j].midiOutValue >> 7, g_midi_cc_list[j].midiOutValue & 0x007F};
+
+                            jack_midi_data_t buffer[3];
+                            
+                            buffer [0] = 0xb0 + g_midi_cc_list[j].channel;
+
+                            for(uint_fast8_t b = 0; b < 4; b++)
+                            {
+                                buffer [1] = ccs[b];
+                                buffer [2] = data[b];
+                                error_sending = jack_midi_event_write(buf, 0, buffer, 3);
+                            }
+                        }
+                        g_midi_cc_list[j].midiOutValue = -1;
+                    }
+                    else
+                    {
+                        jack_midi_data_t buffer[3];
+                        buffer [0] = 0xb0 + g_midi_cc_list[j].channel;
+                        buffer [1] = g_midi_cc_list[j].controller;
+                        buffer [2] = g_midi_cc_list[j].midiOutValue;
+                        g_midi_cc_list[j].midiOutValue = -1;
+                        error_sending = jack_midi_event_write(buf, 0, buffer, 3);
+                    }
+                }
+
+                if(error_sending)
+                    break;
+            }
+        }
+    }
     // Handle input MIDI events
     void *const port_buf = jack_port_get_buffer(g_midi_in_port, nframes);
     const jack_nframes_t event_count = jack_midi_get_event_count(port_buf);
@@ -2862,6 +2990,65 @@ static int ProcessGlobalClient(jack_nframes_t nframes, void *arg)
             controller = event.buffer[1];
             mvalue     = event.buffer[2];
             highres    = false;
+
+            if(g_enable_nrpn)
+            {
+                switch(controller)
+                {
+                    // nrpn param num msb
+                    case 99 :
+                    {
+                        // bit 16 = 0 indicates that msb is set.
+                        // bit 15 = 1 indicates that lsb is not set.
+                        g_nrpn_param_num = 0x4000 | (mvalue << 7);
+
+                        continue;
+                    }
+                    break;
+
+                    // nrpn param num lsb
+                    case 98 :
+                    {
+                        // if msb has already been set
+                        if((g_nrpn_param_num & 0x8000) == 0)
+                            g_nrpn_param_num = (g_nrpn_param_num & 0x3F80) | mvalue;
+
+                        continue;
+                    }
+                    break;
+
+                    // nrpn param value msb
+                    case 6 :
+                    {
+                        // bit 16 = 0 indicates that msb is set.
+                        // bit 15 = 1 indicates that lsb is not set.
+                        g_nrpn_param_value = 0x4000 | (mvalue << 7);
+
+                        continue;
+                    }
+                    break;
+
+                    // nrpn param value lsb
+                    case 38 :
+                    {
+                        // if msb has already been set
+                        if((g_nrpn_param_value & 0x8000) == 0)
+                        {
+                            highres = true;
+                            controller = 0x8000 | g_nrpn_param_num;
+                            mvalue = (g_nrpn_param_value & 0x3F80) | mvalue;
+                            g_nrpn_param_value = 0xC000;   // Set so we need MSB and LSB again
+
+                        }
+                        else
+                            continue;
+                    }
+                    break;
+
+                    default:
+                    break;
+                }
+            }
 #ifdef _DARKGLASS_PABLITO
             channel    = (event.buffer[0] & 0x0F);
             switch (controller)
@@ -2971,6 +3158,11 @@ static int ProcessGlobalClient(jack_nframes_t nframes, void *arg)
             {
                 handled = true;
                 value = UpdateValueFromMidi(&g_midi_cc_list[j], mvalue, highres);
+
+                // if midi feedback sync is enabled set the output CC to send back out over midi
+                // this will keep any other devices synced.
+                if(g_enable_midi_feedback_sync)
+                    SetMidiOutValue(&(g_midi_cc_list[j]));
 
                 postponed_event_list_data* const posteventptr = rtsafe_memory_pool_allocate_atomic(g_rtsafe_mem_pool);
 
@@ -3593,6 +3785,41 @@ static void ConnectToAllHardwareMIDIPorts(void)
         pthread_mutex_unlock(&g_raw_midi_port_mutex);
 
         jack_free(midihwports);
+    }
+
+    if(g_enable_midi_feedback)
+    {
+        const char** const midihwports = jack_get_ports(g_jack_global_client, "",
+                                                        JACK_DEFAULT_MIDI_TYPE,
+                                                        JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
+        if (midihwports != NULL)
+        {
+            const char *ourportname = jack_port_name(g_midi_out_port);
+
+            char  aliases[2][320];
+            char* aliasesptr[2] = {
+                aliases[0],
+                aliases[1]
+            };
+
+            for (int i=0; midihwports[i] != NULL; ++i)
+            {
+                jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
+
+                if (port == NULL)
+                    continue;
+
+                if (jack_port_get_aliases(port, aliasesptr) > 0)
+                {
+                    if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
+                        continue;
+                }
+
+                jack_connect(g_jack_global_client, ourportname, midihwports[i]);
+            }
+
+            jack_free(midihwports);
+        }
     }
 }
 
@@ -4346,7 +4573,38 @@ int effects_init(void* client)
             jack_client_close(g_jack_global_client);
         return ERR_JACK_PORT_REGISTER;
     }
+	
+    // check midi feedback mode 
+    //   ENABLE_MIDI_FEEDBACK = 1 : Enable midi CC feedback
+    //   ENABLE_MIDI_FEEDBACK = 2 : Enable midi CC feedback and also sync devices on input 
 
+    // const char* const enable_midi_feedback = getenv("ENABLE_MIDI_FEEDBACK");
+    // g_enable_midi_feedback      = enable_midi_feedback != NULL && atoi(enable_midi_feedback) != 0;
+    // g_enable_midi_feedback_sync = enable_midi_feedback != NULL && atoi(enable_midi_feedback) == 2;
+
+    g_enable_midi_feedback      = true;
+    g_enable_midi_feedback_sync = true;
+
+    // setup nrpn
+    //   ENABLE_MIDI_NRPN = 1 : Enable midi nrpn
+    const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
+    g_enable_nrpn = enable_nrpn != NULL && atoi(enable_nrpn) != 0;
+    g_nrpn_param_num   = 0xC000; // top two bits signify that msb and lsb need setting
+    g_nrpn_param_value = 0xC000; // top two bits signify that msb and lsb need setting
+
+    // if midi feedback is enable create output midi port
+    if(g_enable_midi_feedback)
+    {
+        g_midi_out_port = jack_port_register(g_jack_global_client, "midi_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+
+        if (! g_midi_out_port)
+        {
+            fprintf(stderr, "can't register global jack midi-out port\n");
+            if (client == NULL)
+                jack_client_close(g_jack_global_client);
+            return ERR_JACK_PORT_REGISTER;
+        }
+    }
 #ifdef MOD_IO_PROCESSING_ENABLED
     g_audio_in1_port = jack_port_register(g_jack_global_client, "in1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
     g_audio_in2_port = jack_port_register(g_jack_global_client, "in2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
@@ -4808,6 +5066,7 @@ int effects_init(void* client)
         g_midi_cc_list[i].effect_id = ASSIGNMENT_NULL;
         g_midi_cc_list[i].symbol = NULL;
         g_midi_cc_list[i].port = NULL;
+        g_midi_cc_list[i].midiOutValue = -1;
     }
     g_midi_learning = NULL;
 
@@ -4850,8 +5109,14 @@ int effects_init(void* client)
 
     if (g_aggregated_midi_enabled)
     {
-        const char *ourportname = jack_port_name(g_midi_in_port);
-        jack_connect(g_jack_global_client, "mod-midi-merger:out", ourportname);
+        const char *ourportnamein = jack_port_name(g_midi_in_port);
+        jack_connect(g_jack_global_client, "mod-midi-merger:out", ourportnamein);
+
+        if(g_enable_midi_feedback)
+        {
+            const char *ourportnameout = jack_port_name(g_midi_out_port);
+            jack_connect(g_jack_global_client, ourportnameout, "mod-midi-broadcaster:in");
+        }
         ConnectToMIDIThroughPorts();
     }
     /* Else connect to all good hw ports (system, ttymidi and nooice) */
@@ -6807,6 +7072,28 @@ int effects_disconnect_all(const char *port)
     return ret;
 }
 
+void effects_send_midi_feedback(int effect_id, const char *control_symbol)
+{
+    for (int j = 0; j < MAX_MIDI_CC_ASSIGN; j++)
+    {
+        if (g_midi_cc_list[j].effect_id == ASSIGNMENT_NULL)
+            break;
+        if (g_midi_cc_list[j].effect_id == ASSIGNMENT_UNUSED)
+            continue;
+        if (g_midi_cc_list[j].effect_id  == effect_id)
+        { 
+            // avoid call to strcmp and compare strings ourselves
+            bool bEqual = false;
+            for(const char *s1 = control_symbol, *s2 = g_midi_cc_list[j].symbol; (bEqual = *s1 == *s2) && *s1; s1++, s2++)
+                /* empty loop*/;
+
+            if(bEqual)
+                SetMidiOutValue(&(g_midi_cc_list[j]));
+        }
+        
+    }
+}
+
 int effects_set_parameter(int effect_id, const char *control_symbol, float value)
 {
     port_t *port;
@@ -6834,7 +7121,11 @@ int effects_set_parameter(int effect_id, const char *control_symbol, float value
 #ifdef WITH_EXTERNAL_UI_SUPPORT
                 *last_hints |= HINT_SHOULD_UPDATE;
 #endif
-                return SUCCESS;
+            // if midi feedback is enabled find the correct CC and set it to be output
+            if(g_enable_midi_feedback)
+                effects_send_midi_feedback(effect_id, control_symbol);
+
+            return SUCCESS;
             }
         }
 
@@ -6855,6 +7146,10 @@ int effects_set_parameter(int effect_id, const char *control_symbol, float value
                 value = last_max;
 
             *last_prev = *last_buffer = value;
+
+            // if midi feedback is enabled find the correct CC and set it to be output
+            if(g_enable_midi_feedback)
+                effects_send_midi_feedback(effect_id, control_symbol);
 
 #ifdef WITH_EXTERNAL_UI_SUPPORT
             last_hints = &port->hints;
@@ -7832,6 +8127,10 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
         {
             g_midi_cc_list[i].minimum = minimum;
             g_midi_cc_list[i].maximum = maximum;
+        
+            // if midi feedback is enabled set this cc to be sent
+            if(g_enable_midi_feedback)
+                SetMidiOutValue(&(g_midi_cc_list[i]));
         }
 
         return SUCCESS;
@@ -7859,6 +8158,10 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
             g_midi_cc_list[i].maximum = maximum;
             g_midi_cc_list[i].symbol = port->symbol;
             g_midi_cc_list[i].port = port;
+
+            // if midi feedback is enabled set this cc to be sent
+            if(g_enable_midi_feedback)
+                SetMidiOutValue(&(g_midi_cc_list[i]));
         }
 
         g_midi_cc_list[i].channel = channel;
@@ -9103,6 +9406,12 @@ int effects_aggregated_midi_enable(int enable)
             pthread_mutex_unlock(&g_raw_midi_port_mutex);
         }
 
+        // step7. If midi feedback enabled then connect to mod-midi-broadcaster
+        if(g_enable_midi_feedback)
+        {
+            const char *ourportnameout = jack_port_name(g_midi_out_port);
+            jack_connect(g_jack_global_client, ourportnameout, "mod-midi-broadcaster:in");
+        }
     } else {
         // step 1. remove aggregated midi clients
         jack_intclient_t merger = jack_internal_client_handle(g_jack_global_client, "mod-midi-merger", NULL);

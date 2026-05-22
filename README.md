@@ -1,4 +1,4 @@
-mod-host
+2026mod-host
 ========
 
 About
@@ -236,6 +236,14 @@ The commands supported by mod-host are:
     monitor_midi_program <midi_channel> <enable>
         * listen to MIDI program change messages (on the feedback port)
         e.g.: monitor_midi_program 0 1
+
+    set_midi_program_change_pedalboard_bank_channel <enable> <midi_channel>
+        * set the MIDI channel which changes pedalboard banks on MIDI program change. <midi_channel> is in the range of [0,15].
+        e.g.: set_midi_program_change_pedalboard_bank_channel 1 5 to enable listening for bank changes on channel 6
+
+    set_midi_program_change_pedalboard_snapshot_channel <enable> <midi_channel>
+        * set the MIDI channel which changes pedalboard snapshots on MIDI program change. <midi_channel> is in the range of [0,15].
+        e.g.: set_midi_program_change_pedalboard_snapshot_channel 1 4 to enable listening for preset changes on channel 5
 
     cc_map <instance_number> <param_symbol> <device_id> <actuator_id> <label> <value> <minimum> <maximum> <steps> <extraflags> <unit> <scalepoints_count> <scalepoints...>
         * map a Control Chain actuator to a control port
