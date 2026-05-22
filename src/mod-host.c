@@ -42,6 +42,7 @@
 #endif
 
 #ifndef SKIP_READLINE
+#include <unistd.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #endif
