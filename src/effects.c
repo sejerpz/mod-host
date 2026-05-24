@@ -4587,8 +4587,9 @@ int effects_init(void* client)
 
     // setup nrpn
     //   ENABLE_MIDI_NRPN = 1 : Enable midi nrpn
-    const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
-    g_enable_nrpn = enable_nrpn != NULL && atoi(enable_nrpn) != 0;
+    //const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
+    //g_enable_nrpn = enable_nrpn != NULL && atoi(enable_nrpn) != 0;
+    g_enable_nrpm = true;
     g_nrpn_param_num   = 0xC000; // top two bits signify that msb and lsb need setting
     g_nrpn_param_value = 0xC000; // top two bits signify that msb and lsb need setting
 
