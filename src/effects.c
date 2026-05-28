@@ -8208,9 +8208,6 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
 
 int effects_midi_unmap(int effect_id, const char *control_symbol)
 {
-    // printf("effects_midi_unmap DISABLED\n");
-    // return SUCCESS;
-    
     if (!InstanceExist(effect_id))
     {
         return ERR_INSTANCE_NON_EXISTS;
