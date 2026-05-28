@@ -1088,16 +1088,45 @@ static void Log(const char *psFormatString, ...)
 
 static void SetMidiOutValue(midi_cc_t *midiCC)
 {
-    float value = *(midiCC->port->buffer);
+    bool bIsValid = true;
+    float fNormal;
 
-    float fRange = midiCC->maximum - midiCC->minimum;
-    float fNormal = (value - midiCC->minimum) / fRange;
+    // Handle bypass. quick test first to avoid string comparison if not needed
+    if(NULL == midiCC->port)
+    {
+        bool bIsBypass = false;
+        for(const char *s1 = midiCC->symbol, *s2 = BYPASS_PORT_SYMBOL; (bIsBypass = *s1 == *s2) && *s1; s1++, s2++)
+            /* empty block */;
 
-    // if high bit is set controller is an nrpn with 14 bit value
-    if(midiCC->controller & 0x8000)
-        midiCC->midiOutValue = fNormal * 16383;
+        if(bIsBypass)
+        {
+            // get correct bypass value
+            effect_t *effect = &g_effects[midiCC->effect_id];
+            fNormal = !(effect->bypass); // As far as I can see effect->bypass is either 1 or 0 and inverted.
+        }
+        else
+        {
+            bIsValid = false;
+            if (g_verbose_debug)
+                printf("DEBUG: SetMidiOutValue '%s': port is null and midiCC is not a bypass\n", midiCC->symbol);
+        }
+    }
     else
-        midiCC->midiOutValue = fNormal * 127;
+    {
+        float value = *(midiCC->port->buffer);
+
+        float fRange = midiCC->maximum - midiCC->minimum;
+        fNormal = (value - midiCC->minimum) / fRange;
+    }
+
+    if(bIsValid)
+    {
+        // if high bit is set controller is an nrpn with 14 bit value
+        if(midiCC->controller & 0x8000)
+            midiCC->midiOutValue = fNormal * 16383;
+        else
+            midiCC->midiOutValue = fNormal * 127;
+    }
 }
 
 static void InstanceDelete(int effect_id)
@@ -4575,21 +4604,18 @@ int effects_init(void* client)
     }
 	
     // check midi feedback mode 
-    //   ENABLE_MIDI_FEEDBACK = 1 : Enable midi CC feedback
-    //   ENABLE_MIDI_FEEDBACK = 2 : Enable midi CC feedback and also sync devices on input 
+    // ENABLE_MIDI_FEEDBACK==0 Turn midi feedback off
+    // ENABLE_MIDI_FEEDBACK==1 Turn midi feedback on with no sync for multiple devices
+    // ENABLE_MIDI_FEEDBACK==2 Turn midi feedback on with sync for multiple devices
+    const char* const enable_midi_feedback = getenv("ENABLE_MIDI_FEEDBACK");
+    g_enable_midi_feedback      = enable_midi_feedback == NULL || atoi(enable_midi_feedback) != 0; 
+    g_enable_midi_feedback_sync = enable_midi_feedback == NULL || atoi(enable_midi_feedback) == 2;
 
-    // const char* const enable_midi_feedback = getenv("ENABLE_MIDI_FEEDBACK");
-    // g_enable_midi_feedback      = enable_midi_feedback != NULL && atoi(enable_midi_feedback) != 0;
-    // g_enable_midi_feedback_sync = enable_midi_feedback != NULL && atoi(enable_midi_feedback) == 2;
-
-    g_enable_midi_feedback      = true;
-    g_enable_midi_feedback_sync = true;
-
-    // setup nrpn
-    //   ENABLE_MIDI_NRPN = 1 : Enable midi nrpn
-    //const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
-    //g_enable_nrpn = enable_nrpn != NULL && atoi(enable_nrpn) != 0;
-    g_enable_nrpn = true;
+    // setup nrpn mode
+    // ENABLE_MIDI_FEEDBACK==0 Turn NRPN off
+    // ENABLE_MIDI_FEEDBACK==1 Turn NRPN on
+    const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
+    g_enable_nrpn = enable_nrpn == NULL || atoi(enable_nrpn) != 0;
     g_nrpn_param_num   = 0xC000; // top two bits signify that msb and lsb need setting
     g_nrpn_param_value = 0xC000; // top two bits signify that msb and lsb need setting
 
@@ -7878,6 +7904,9 @@ int effects_bypass(int effect_id, int value)
         port->prev_value = *port->buffer = value ? 0.0f : 1.0f;
     }
 
+    if(g_enable_midi_feedback)
+        effects_send_midi_feedback(effect_id, BYPASS_PORT_SYMBOL);
+
     return SUCCESS;
 }
 
@@ -7904,6 +7933,9 @@ int effects_bypass_multi(int value, int num_effects, int *effects)
                 port = effect->ports[effect->enabled_index];
                 port->prev_value = *port->buffer = enabled_value;
             }
+
+            if(g_enable_midi_feedback)
+                effects_send_midi_feedback(effect_id, BYPASS_PORT_SYMBOL);
         }
     }
 
@@ -8176,6 +8208,9 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
 
 int effects_midi_unmap(int effect_id, const char *control_symbol)
 {
+    // printf("effects_midi_unmap DISABLED\n");
+    // return SUCCESS;
+    
     if (!InstanceExist(effect_id))
     {
         return ERR_INSTANCE_NON_EXISTS;
