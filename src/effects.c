@@ -3798,8 +3798,10 @@ static void ConnectToAllHardwareMIDIPorts(void)
         const char *ourportname = jack_port_name(g_midi_in_port);
 
         for (int i=0; midihwports[i] != NULL; ++i)
+        {
+            printf("%s\n", midihwports[i]);
             jack_connect(g_jack_global_client, midihwports[i], ourportname);
-
+        }
         struct list_head *it;
         pthread_mutex_lock(&g_raw_midi_port_mutex);
         list_for_each(it, &g_raw_midi_port_list)
@@ -3816,41 +3818,7 @@ static void ConnectToAllHardwareMIDIPorts(void)
         jack_free(midihwports);
     }
 
-    if(g_enable_midi_feedback)
-    {
-        const char** const midihwports = jack_get_ports(g_jack_global_client, "",
-                                                        JACK_DEFAULT_MIDI_TYPE,
-                                                        JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
-        if (midihwports != NULL)
-        {
-            const char *ourportname = jack_port_name(g_midi_out_port);
-
-            char  aliases[2][320];
-            char* aliasesptr[2] = {
-                aliases[0],
-                aliases[1]
-            };
-
-            for (int i=0; midihwports[i] != NULL; ++i)
-            {
-                jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
-
-                if (port == NULL)
-                    continue;
-
-                if (jack_port_get_aliases(port, aliasesptr) > 0)
-                {
-                    if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
-                        continue;
-                }
-
-                jack_connect(g_jack_global_client, ourportname, midihwports[i]);
-            }
-
-            jack_free(midihwports);
-        }
-    }
-}
+ }
 
 static void ConnectToMIDIThroughPorts(void)
 {
@@ -4603,35 +4571,17 @@ int effects_init(void* client)
         return ERR_JACK_PORT_REGISTER;
     }
 	
-    // check midi feedback mode 
-    // ENABLE_MIDI_FEEDBACK==0 Turn midi feedback off
-    // ENABLE_MIDI_FEEDBACK==1 Turn midi feedback on with no sync for multiple devices
-    // ENABLE_MIDI_FEEDBACK==2 Turn midi feedback on with sync for multiple devices
-    const char* const enable_midi_feedback = getenv("ENABLE_MIDI_FEEDBACK");
-    g_enable_midi_feedback      = enable_midi_feedback == NULL || atoi(enable_midi_feedback) != 0; 
-    g_enable_midi_feedback_sync = enable_midi_feedback == NULL || atoi(enable_midi_feedback) == 2;
+    // midi feedback and NRPNs disabled on start
+    // use "feature_enable" to enable them
+    g_enable_midi_feedback = false;
+    g_enable_midi_feedback_sync = false;
+    g_enable_nrpn = false;
 
-    // setup nrpn mode
-    // ENABLE_MIDI_FEEDBACK==0 Turn NRPN off
-    // ENABLE_MIDI_FEEDBACK==1 Turn NRPN on
-    const char* const enable_nrpn = getenv("ENABLE_MIDI_NRPN");
-    g_enable_nrpn = enable_nrpn == NULL || atoi(enable_nrpn) != 0;
+    
+    // setup nrpn 
     g_nrpn_param_num   = 0xC000; // top two bits signify that msb and lsb need setting
     g_nrpn_param_value = 0xC000; // top two bits signify that msb and lsb need setting
 
-    // if midi feedback is enable create output midi port
-    if(g_enable_midi_feedback)
-    {
-        g_midi_out_port = jack_port_register(g_jack_global_client, "midi_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
-
-        if (! g_midi_out_port)
-        {
-            fprintf(stderr, "can't register global jack midi-out port\n");
-            if (client == NULL)
-                jack_client_close(g_jack_global_client);
-            return ERR_JACK_PORT_REGISTER;
-        }
-    }
 #ifdef MOD_IO_PROCESSING_ENABLED
     g_audio_in1_port = jack_port_register(g_jack_global_client, "in1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
     g_audio_in2_port = jack_port_register(g_jack_global_client, "in2", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
@@ -5151,6 +5101,18 @@ int effects_init(void* client)
     {
         ConnectToAllHardwareMIDIPorts();
     }
+
+    // enable midi feedback, sync and nrpn
+    if(access("/data/midi-feedback", F_OK) != -1) 
+        effects_midi_feedback_enable(true);
+
+    if(access("/data/midi-feedback-sync", F_OK) != -1) 
+        effects_midi_feedback_sync_enable(true);
+    
+    if(access("/data/midi-nrpn", F_OK) != -1) 
+        effects_midi_nrpn_enable(true);
+    
+
 
 #ifdef MOD_IO_PROCESSING_ENABLED
     /* Connect to capture ports if avaiable */
@@ -9528,6 +9490,88 @@ int effects_processing_enable(int enable)
         return ERR_INVALID_OPERATION;
     }
 
+    return SUCCESS;
+}
+
+int effects_midi_feedback_enable(int enable) 
+{
+    bool newSetting = enable != 0;
+    int result = SUCCESS;
+
+    if(newSetting != g_enable_midi_feedback)
+    {
+        g_enable_midi_feedback = enable != 0;
+        
+        if(g_enable_midi_feedback) 
+        {
+            // turn on
+            g_midi_out_port = jack_port_register(g_jack_global_client, "midi_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0); 
+
+            if (! g_midi_out_port)
+            {
+                fprintf(stderr, "can't register global jack midi-out port\n");
+                g_enable_midi_feedback = false;
+
+                result = ERR_JACK_PORT_REGISTER;
+            }
+            else
+            {
+                // only if mod-midi-merger does not exist
+                if(jack_port_by_name(g_jack_global_client, "mod-midi-merger:out") == NULL)
+                {
+                    const char** const midihwports = jack_get_ports(g_jack_global_client, "",
+                                                                    JACK_DEFAULT_MIDI_TYPE,
+                                                                    JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
+                    if (midihwports != NULL)
+                    {
+                        const char *ourportname = jack_port_name(g_midi_out_port);
+
+                        char  aliases[2][320];
+                        char* aliasesptr[2] = {
+                            aliases[0],
+                            aliases[1]
+                        };
+
+                        for (int i=0; midihwports[i] != NULL; ++i)
+                        {
+                            jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
+
+                            if (port == NULL)
+                                continue;
+
+                            if (jack_port_get_aliases(port, aliasesptr) > 0)
+                            {
+                                if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
+                                    continue;
+                            }
+
+                            jack_connect(g_jack_global_client, ourportname, midihwports[i]);
+                        }
+
+                        jack_free(midihwports);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // turn off
+            jack_port_unregister(g_jack_global_client, g_midi_out_port);
+            g_midi_out_port = NULL;
+        }
+    }
+    return result;
+}
+
+int effects_midi_feedback_sync_enable(int enable) 
+{
+    g_enable_midi_feedback_sync = enable != 0;
+    return SUCCESS;
+}
+
+int effects_midi_nrpn_enable(int enable) 
+{
+    g_enable_nrpn = enable != 0;
     return SUCCESS;
 }
 
