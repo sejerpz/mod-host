@@ -9516,40 +9516,36 @@ int effects_midi_feedback_enable(int enable)
             }
             else
             {
-                // only if mod-midi-merger does not exist
-                if(jack_port_by_name(g_jack_global_client, "mod-midi-merger:out") == NULL)
+                const char** const midihwports = jack_get_ports(g_jack_global_client, "",
+                                                                JACK_DEFAULT_MIDI_TYPE,
+                                                                JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
+                if (midihwports != NULL)
                 {
-                    const char** const midihwports = jack_get_ports(g_jack_global_client, "",
-                                                                    JACK_DEFAULT_MIDI_TYPE,
-                                                                    JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
-                    if (midihwports != NULL)
+                    const char *ourportname = jack_port_name(g_midi_out_port);
+
+                    char  aliases[2][320];
+                    char* aliasesptr[2] = {
+                        aliases[0],
+                        aliases[1]
+                    };
+
+                    for (int i=0; midihwports[i] != NULL; ++i)
                     {
-                        const char *ourportname = jack_port_name(g_midi_out_port);
+                        jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
 
-                        char  aliases[2][320];
-                        char* aliasesptr[2] = {
-                            aliases[0],
-                            aliases[1]
-                        };
+                        if (port == NULL)
+                            continue;
 
-                        for (int i=0; midihwports[i] != NULL; ++i)
+                        if (jack_port_get_aliases(port, aliasesptr) > 0)
                         {
-                            jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
-
-                            if (port == NULL)
+                            if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
                                 continue;
-
-                            if (jack_port_get_aliases(port, aliasesptr) > 0)
-                            {
-                                if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
-                                    continue;
-                            }
-
-                            jack_connect(g_jack_global_client, ourportname, midihwports[i]);
                         }
 
-                        jack_free(midihwports);
+                        jack_connect(g_jack_global_client, ourportname, midihwports[i]);
                     }
+
+                    jack_free(midihwports);
                 }
             }
         }
