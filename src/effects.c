@@ -5089,11 +5089,6 @@ int effects_init(void* client)
         const char *ourportnamein = jack_port_name(g_midi_in_port);
         jack_connect(g_jack_global_client, "mod-midi-merger:out", ourportnamein);
 
-        if(g_enable_midi_feedback)
-        {
-            const char *ourportnameout = jack_port_name(g_midi_out_port);
-            jack_connect(g_jack_global_client, ourportnameout, "mod-midi-broadcaster:in");
-        }
         ConnectToMIDIThroughPorts();
     }
     /* Else connect to all good hw ports (system, ttymidi and nooice) */
@@ -9419,6 +9414,10 @@ int effects_aggregated_midi_enable(int enable)
 
         // step 2. connect to all midi hw ports
         ConnectToAllHardwareMIDIPorts();
+
+        // step 3. connect feedback if needed
+        if(g_enable_midi_feedback)
+            effects_midi_feedback_connect_hw_ports();
     }
 #endif // HAVE_JACK2
 
@@ -9493,6 +9492,42 @@ int effects_processing_enable(int enable)
     return SUCCESS;
 }
 
+void effects_midi_feedback_connect_hw_ports(void)
+{
+    const char** const midihwports = jack_get_ports(g_jack_global_client, "",
+                                                    JACK_DEFAULT_MIDI_TYPE,
+                                                    JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
+    if (midihwports != NULL)
+    {
+        const char *ourportname = jack_port_name(g_midi_out_port);
+
+        char  aliases[2][320];
+        char* aliasesptr[2] = {
+            aliases[0],
+            aliases[1]
+        };
+
+        for (int i=0; midihwports[i] != NULL; ++i)
+        {
+            jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
+
+            if (port == NULL)
+                continue;
+
+            if (jack_port_get_aliases(port, aliasesptr) > 0)
+            {
+                if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
+                    continue;
+            }
+
+            jack_connect(g_jack_global_client, ourportname, midihwports[i]);
+        }
+
+        jack_free(midihwports);
+    }
+
+}
+
 int effects_midi_feedback_enable(int enable) 
 {
     bool newSetting = enable != 0;
@@ -9516,36 +9551,14 @@ int effects_midi_feedback_enable(int enable)
             }
             else
             {
-                const char** const midihwports = jack_get_ports(g_jack_global_client, "",
-                                                                JACK_DEFAULT_MIDI_TYPE,
-                                                                JackPortIsTerminal|JackPortIsPhysical|JackPortIsInput);
-                if (midihwports != NULL)
+                if(g_aggregated_midi_enabled)
                 {
-                    const char *ourportname = jack_port_name(g_midi_out_port);
-
-                    char  aliases[2][320];
-                    char* aliasesptr[2] = {
-                        aliases[0],
-                        aliases[1]
-                    };
-
-                    for (int i=0; midihwports[i] != NULL; ++i)
-                    {
-                        jack_port_t* const port = jack_port_by_name(g_jack_global_client, midihwports[i]);
-
-                        if (port == NULL)
-                            continue;
-
-                        if (jack_port_get_aliases(port, aliasesptr) > 0)
-                        {
-                            if (strncmp(aliases[0], "alsa_pcm:Midi-Through/", 22) == 0)
-                                continue;
-                        }
-
-                        jack_connect(g_jack_global_client, ourportname, midihwports[i]);
-                    }
-
-                    jack_free(midihwports);
+                    const char *ourportnameout = jack_port_name(g_midi_out_port);
+                    jack_connect(g_jack_global_client, ourportnameout, "mod-midi-broadcaster:in");
+                }
+                else
+                {
+                    effects_midi_feedback_connect_hw_ports();
                 }
             }
         }
