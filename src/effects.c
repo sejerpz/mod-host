@@ -796,6 +796,7 @@ static jack_port_t *g_audio_out2_port;
 static audio_monitor_t *g_audio_monitors;
 static pthread_mutex_t g_audio_monitor_mutex;
 static int g_audio_monitor_count;
+static int g_audio_monitor_port_id = 0; // this contains the next index to be used for a new audio monitor port name, it is never decremented when a port is removed
 static jack_port_t *g_midi_in_port;
 static jack_port_t *g_midi_out_port;
 static jack_position_t g_jack_pos;
@@ -9586,69 +9587,109 @@ int effects_midi_nrpn_enable(int enable)
 
 int effects_monitor_audio_levels(const char *source_port_name, int enable)
 {
-    if (g_jack_global_client == NULL)
+    if (g_jack_global_client == NULL || source_port_name == NULL || source_port_name[0] == '\0')
         return ERR_INVALID_OPERATION;
 
     if (enable)
     {
-        for (int i = 0; i < g_audio_monitor_count; ++i)
-        {
-            if (!strcmp(g_audio_monitors[i].source_port_name, source_port_name))
-                return SUCCESS;
-        }
+        int port_id = -1;
 
         pthread_mutex_lock(&g_audio_monitor_mutex);
-        g_audio_monitors = realloc(g_audio_monitors, sizeof(audio_monitor_t) * (g_audio_monitor_count + 1));
+        for (int i = 0; i < g_audio_monitor_count; ++i)
+        {
+            if (g_audio_monitors[i].source_port_name &&
+                strcmp(g_audio_monitors[i].source_port_name, source_port_name) == 0)
+            {
+                pthread_mutex_unlock(&g_audio_monitor_mutex);
+                return SUCCESS;
+            }
+        }
+
+        // assign new port id
+        port_id = ++g_audio_monitor_port_id;
         pthread_mutex_unlock(&g_audio_monitor_mutex);
 
-        if (g_audio_monitors == NULL)
-            return ERR_MEMORY_ALLOCATION;
-
-        audio_monitor_t *monitor = &g_audio_monitors[g_audio_monitor_count];
-
+        // setup new jack monitor port
         char port_name[0xff];
-        snprintf(port_name, sizeof(port_name) - 1, "monitor_%d", g_audio_monitor_count + 1);
+        snprintf(port_name, sizeof(port_name) - 1, "monitor_%d", port_id);
 
         jack_port_t *port = jack_port_register(g_jack_global_client,
                                                port_name,
                                                JACK_DEFAULT_AUDIO_TYPE,
                                                JackPortIsInput,
                                                0);
+
         if (port == NULL)
             return ERR_JACK_PORT_REGISTER;
 
         snprintf(port_name, sizeof(port_name) - 1, "%s:monitor_%d",
-                 jack_get_client_name(g_jack_global_client), g_audio_monitor_count + 1);
-        jack_connect(g_jack_global_client, source_port_name, port_name);
+                 jack_get_client_name(g_jack_global_client), port_id);
 
+        if (jack_connect(g_jack_global_client, source_port_name, port_name) != 0)
+        {
+            jack_port_unregister(g_jack_global_client, port);
+            return ERR_JACK_PORT_REGISTER;
+        }
+
+        // commit the new monitor port to the list of active monitors
+        pthread_mutex_lock(&g_audio_monitor_mutex);
+        audio_monitor_t *tmp = realloc(g_audio_monitors,
+                                      sizeof(audio_monitor_t) * (g_audio_monitor_count + 1));
+        if (tmp == NULL)
+        {
+            pthread_mutex_unlock(&g_audio_monitor_mutex);
+            jack_port_unregister(g_jack_global_client, port);
+            return ERR_MEMORY_ALLOCATION;
+        }
+
+        g_audio_monitors = tmp;
+
+        audio_monitor_t *monitor = &g_audio_monitors[g_audio_monitor_count];
         monitor->port = port;
         monitor->source_port_name = strdup(source_port_name);
         monitor->value = 0.f;
 
         ++g_audio_monitor_count;
+        pthread_mutex_unlock(&g_audio_monitor_mutex);
     }
     else
     {
-        if (g_audio_monitor_count == 0)
-            return ERR_INVALID_OPERATION;
-
-        audio_monitor_t *monitor = &g_audio_monitors[g_audio_monitor_count - 1];
-
-        if (strcmp(monitor->source_port_name, source_port_name))
-            return ERR_INVALID_OPERATION;
-
         pthread_mutex_lock(&g_audio_monitor_mutex);
-        --g_audio_monitor_count;
-        pthread_mutex_unlock(&g_audio_monitor_mutex);
+        int idx = -1;
+        for (int i = 0; i < g_audio_monitor_count; ++i)
+        {
+            if (!strcmp(g_audio_monitors[i].source_port_name, source_port_name))
+            {
+                idx = i;
+                break;
+            }
+        }
 
-        jack_port_unregister(g_jack_global_client, monitor->port);
-        free(monitor->source_port_name);
+        if (idx < 0)
+        {
+            pthread_mutex_unlock(&g_audio_monitor_mutex);
+            return ERR_INVALID_OPERATION;
+        }
+
+        jack_port_t *port = g_audio_monitors[idx].port;
+        char *source_name = g_audio_monitors[idx].source_port_name;
+
+        for (int i = idx; i + 1 < g_audio_monitor_count; ++i)
+        {
+            g_audio_monitors[i] = g_audio_monitors[i + 1];
+        }
+        --g_audio_monitor_count;
 
         if (g_audio_monitor_count == 0)
         {
             free(g_audio_monitors);
             g_audio_monitors = NULL;
         }
+        pthread_mutex_unlock(&g_audio_monitor_mutex);
+
+        // this can be slow, so we do it outside the mutex lock
+        jack_port_unregister(g_jack_global_client, port);
+        free(source_name);
     }
 
     return SUCCESS;
