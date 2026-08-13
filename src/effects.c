@@ -4609,8 +4609,8 @@ int effects_init(void* client)
     // ENABLE_MIDI_FEEDBACK==1 Turn midi feedback on with no sync for multiple devices
     // ENABLE_MIDI_FEEDBACK==2 Turn midi feedback on with sync for multiple devices
     const char* const enable_midi_feedback = getenv("ENABLE_MIDI_FEEDBACK");
-    g_enable_midi_feedback      = enable_midi_feedback == NULL || atoi(enable_midi_feedback) != 0; 
-    g_enable_midi_feedback_sync = enable_midi_feedback == NULL || atoi(enable_midi_feedback) == 2;
+    g_enable_midi_feedback      = enable_midi_feedback != NULL && atoi(enable_midi_feedback) != 0; 
+    g_enable_midi_feedback_sync = enable_midi_feedback != NULL && atoi(enable_midi_feedback) == 2;
 
     // setup nrpn mode
     // ENABLE_MIDI_FEEDBACK==0 Turn NRPN off
