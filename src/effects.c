@@ -641,7 +641,7 @@ typedef struct POSTPONED_AUDIO_MONITOR_EVENT_T {
 
 typedef struct POSTPONED_MIDI_CONTROL_CHANGE_EVENT_T {
     int8_t channel;
-    int8_t control;
+    uint16_t controller;    // if high bit set then controller is an nrpn
     int16_t value;
 } postponed_midi_control_change_event_t;
 
@@ -654,7 +654,7 @@ typedef struct POSTPONED_MIDI_MAP_EVENT_T {
     int effect_id;
     const char* symbol;
     int8_t channel;
-    uint8_t controller;
+    uint16_t controller;    // if high bit set then controller is an nrpn
     float value;
     float minimum;
     float maximum;
@@ -1568,7 +1568,7 @@ static void RunPostPonedEvents(int ignored_effect_id)
         case POSTPONED_MIDI_CONTROL_CHANGE:
             snprintf(buf, FEEDBACK_BUF_SIZE, "midi_control_change %i %i %i",
                      eventptr->event.control_change.channel,
-                     eventptr->event.control_change.control,
+                     eventptr->event.control_change.controller,
                      eventptr->event.control_change.value);
             socket_send_feedback_debug(buf);
             break;
@@ -3268,7 +3268,7 @@ static int ProcessGlobalClient(jack_nframes_t nframes, void *arg)
                 {
                     posteventptr->event.type = POSTPONED_MIDI_CONTROL_CHANGE;
                     posteventptr->event.control_change.channel = channel;
-                    posteventptr->event.control_change.control = controller;
+                    posteventptr->event.control_change.controller = controller;
                     posteventptr->event.control_change.value = mvalue;
 
                     pthread_mutex_lock(&g_rtsafe_mutex);
@@ -6141,7 +6141,7 @@ int effects_add(const char *uri, int instance, int activate)
     effect->presets_port.buffer_count = 1;
     effect->presets_port.buffer = &effect->preset_value;
     effect->presets_port.min_value = 0.0f;
-    effect->presets_port.max_value = 1.0f;
+    effect->presets_port.max_value = 126.0f;
     effect->presets_port.def_value = 0.0f;
     effect->presets_port.prev_value = 0.0f;
     effect->presets_port.type = TYPE_CONTROL;
@@ -8098,6 +8098,7 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
     }
 
     const bool is_bypass = !strcmp(control_symbol, g_bypass_port_symbol);
+    const bool is_preset = !strcmp(control_symbol, g_presets_port_symbol);
 
     // update current mapping first if it exists
     for (int i = 0; i < MAX_MIDI_CC_ASSIGN; i++)
@@ -8133,6 +8134,10 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
         if (INSTANCE_IS_VALID(g_midi_cc_list[i].effect_id))
             continue;
 
+        g_midi_cc_list[i].channel = channel;
+        g_midi_cc_list[i].controller = controller;
+        g_midi_cc_list[i].effect_id = effect_id;
+
         if (is_bypass)
         {
             g_midi_cc_list[i].symbol = g_bypass_port_symbol;
@@ -8150,14 +8155,16 @@ int effects_midi_map(int effect_id, const char *control_symbol, int channel, int
             g_midi_cc_list[i].symbol = port->symbol;
             g_midi_cc_list[i].port = port;
 
+            if(is_preset) {
+                port->min_value = minimum;
+                port->max_value = maximum;
+            }
+
             // if midi feedback is enabled set this cc to be sent
             if(g_enable_midi_feedback)
                 SetMidiOutValue(&(g_midi_cc_list[i]));
         }
 
-        g_midi_cc_list[i].channel = channel;
-        g_midi_cc_list[i].controller = controller;
-        g_midi_cc_list[i].effect_id = effect_id;
         return SUCCESS;
     }
 
@@ -8669,8 +8676,17 @@ int effects_cv_map(int effect_id, const char *control_symbol, const char *source
             char *value_max = NULL;
 
             // get values from jack metadata
+#ifdef __MOD_DEVICES__ 
             if (jack_get_property(uuid, LV2_CORE__minimum, &value_min, NULL) == 0 &&
                 jack_get_property(uuid, LV2_CORE__maximum, &value_max, NULL) == 0)
+#else        
+            // passing NULL for type is seg faulting here on ubuntu so pass type vars in
+            char *type_min = NULL;
+            char *type_max = NULL;
+
+            if (jack_get_property(uuid, LV2_CORE__minimum, &value_min, &type_min) == 0 &&
+                jack_get_property(uuid, LV2_CORE__maximum, &value_max, &type_max) == 0)
+#endif
             {
                 source_has_ranges = true;
                 source_min_value = atof(value_min);

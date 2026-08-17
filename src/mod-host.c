@@ -663,11 +663,11 @@ static void feature_enable(proto_t *proto)
     else if (!strcmp(feature, "processing"))
         resp = effects_processing_enable(enabled);
     else if (!strcmp(feature, "midi-feedback"))
-            resp = effects_midi_feedback_enable(enabled);
-    else if (!strcmp(feature, "midi-feedback_sync"))
-            resp = effects_midi_feedback_sync_enable(enabled);
+        resp = effects_midi_feedback_enable(enabled);
+    else if (!strcmp(feature, "midi-feedback-sync"))
+        resp = effects_midi_feedback_sync_enable(enabled);
     else if (!strcmp(feature, "midi-nrpn"))
-            resp = effects_midi_nrpn_enable(enabled);
+        resp = effects_midi_nrpn_enable(enabled);
     else
         resp = ERR_INVALID_OPERATION;
 
