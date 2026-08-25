@@ -80,6 +80,7 @@ static const char *g_commands[] = {
     "cv_map",
     "cv_unmap",
     "cpu_load",
+    "cpu_load_all",
     "load",
     "save",
     "bundle_add",

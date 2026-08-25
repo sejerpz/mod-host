@@ -34,6 +34,7 @@
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -442,6 +443,10 @@ typedef struct EFFECT_T {
     // cached plugin information, avoids iterating controls each cycle
     enum PluginHints hints;
 
+    // Sits next to hints deliberately: ProcessPlugin reads both at the top of every
+    // cycle, so sharing a cache line with an already-hot field keeps the check free.
+    clockid_t cpu_clockid; // 0 until resolved; glibc thread clock ids are negative
+
     // virtual presets port
     port_t presets_port;
     float preset_value;
@@ -451,6 +456,10 @@ typedef struct EFFECT_T {
 
     // state save/restore custom directory
     const char* state_dir;
+
+    // Only ever touched by the protocol thread (see effects_cpu_load_all), so it is
+    // kept away from the fields the audio callback reads.
+    uint64_t cpu_ns_prev;
 
 #ifdef WITH_EXTERNAL_UI_SUPPORT
     // UI related objects
@@ -1712,6 +1721,20 @@ static int ProcessPlugin(jack_nframes_t nframes, void *arg)
 
     if (arg == NULL) return 0;
     effect = arg;
+
+    /* Resolve this thread's CPU clock once, so effects_cpu_load_all() can read it
+       from the protocol thread. It has to happen here rather than in
+       JackThreadInit(): jack does not run that callback on the thread that ends up
+       calling us, so a clock taken there belongs to a thread that never does any
+       DSP and always reads back as zero. glibc resolves this without a syscall --
+       it just encodes the tid -- so it is safe on the RT path.
+
+       macOS and Windows have no pthread_getcpuclockid; the clock stays unset there
+       and cpu_load_all simply reports nothing for the plugin. */
+#if !defined(__APPLE__) && !defined(_WIN32)
+    if (effect->cpu_clockid == 0 && pthread_getcpuclockid(pthread_self(), &effect->cpu_clockid) != 0)
+        effect->cpu_clockid = 0;
+#endif
 
     if (!g_processing_enabled || (
         (effect->hints & HINT_STATE_UNSAFE) && pthread_mutex_trylock(&effect->state_restore_mutex) != 0))
@@ -7621,6 +7644,76 @@ int effects_hmi_unmap(int effect_id, const char *control_symbol)
 float effects_jack_cpu_load(void)
 {
     return jack_cpu_load(g_jack_global_client);
+}
+
+static uint64_t clock_ns(clockid_t clk)
+{
+    struct timespec ts;
+
+    if (clock_gettime(clk, &ts) != 0)
+        return 0;
+
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* Per-plugin CPU usage, as a percentage of one core, measured between successive
+   calls. Each plugin runs on its own jack RT thread, so we just read that thread's
+   CPU clock from here (the protocol thread) -- the audio path is untouched.
+
+   Note this is CPU time, not jack's DSP load: those diverge by however parallel
+   the graph is, since jack reports the wall-clock span of the whole graph. */
+int effects_cpu_load_all(char *buffer, size_t buffer_size)
+{
+    static uint64_t s_wall_ns_prev = 0;
+
+    const uint64_t wall_ns = clock_ns(CLOCK_MONOTONIC);
+    const uint64_t wall_delta = (wall_ns > s_wall_ns_prev) ? wall_ns - s_wall_ns_prev : 0;
+    const uint64_t wall_prev = s_wall_ns_prev;
+    s_wall_ns_prev = wall_ns;
+
+    size_t used = 0;
+    buffer[0] = '\0';
+
+    for (int i = 0; i < MAX_INSTANCES; i++)
+    {
+        effect_t *effect = &g_effects[i];
+
+        if (effect->jack_client == NULL || effect->cpu_clockid == 0)
+            continue;
+
+        const uint64_t cpu_ns = clock_ns(effect->cpu_clockid);
+
+        if (cpu_ns == 0)
+        {
+            /* the clock went away -- jack rebuilt the process thread, most likely.
+               Drop it and let ProcessPlugin resolve a fresh one. */
+            effect->cpu_clockid = 0;
+            effect->cpu_ns_prev = 0;
+            continue;
+        }
+
+        const uint64_t cpu_prev = effect->cpu_ns_prev;
+        effect->cpu_ns_prev = cpu_ns;
+
+        /* first sample for this plugin, or for the host: no baseline to diff against.
+           cpu_ns can only go backwards if the clock was swapped under us, and the
+           subtraction is unsigned, so guard it rather than print a garbage spike. */
+        if (cpu_prev == 0 || cpu_ns < cpu_prev || wall_prev == 0 || wall_delta == 0)
+            continue;
+
+        const double pct = (double)(cpu_ns - cpu_prev) * 100.0 / (double)wall_delta;
+
+        const int n = snprintf(buffer + used, buffer_size - used, " %i:%.1f", i, pct);
+        if (n < 0 || (size_t)n >= buffer_size - used)
+        {
+            /* out of room; caller sized the buffer, report what fit */
+            buffer[used] = '\0';
+            break;
+        }
+        used += n;
+    }
+
+    return (int)used;
 }
 
 #define OS_SEP '/'

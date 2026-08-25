@@ -32,6 +32,8 @@
 ************************************************************************************************************************
 */
 
+#include <stddef.h>
+
 
 /*
 ************************************************************************************************************************
@@ -173,6 +175,7 @@ int effects_hmi_map(int effect_id, const char *control_symbol, int hw_id, int pa
 int effects_hmi_unmap(int effect_id, const char *control_symbol);
 
 float effects_jack_cpu_load(void);
+int effects_cpu_load_all(char *buffer, size_t buffer_size);
 void effects_bundle_add(const char *bundlepath);
 void effects_bundle_remove(const char *bundlepath, const char *resource);
 int effects_state_load(const char *dir);

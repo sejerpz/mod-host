@@ -17,3 +17,4 @@ tests/rtmempool-test
 tests/self-test-result.json
 src/info.h
 PKGBUILD
+cpuload-test

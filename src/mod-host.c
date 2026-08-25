@@ -446,6 +446,18 @@ static void cpu_load_cb(proto_t *proto)
     protocol_response(buffer, proto);
 }
 
+static void cpu_load_all_cb(proto_t *proto)
+{
+    /* One " <id>:<pct>" entry per plugin is ~12 bytes, so this holds a few hundred
+       plugins; effects_cpu_load_all() truncates cleanly rather than overrunning. */
+    char buffer[8192];
+    const int len = snprintf(buffer, sizeof(buffer), "resp 0");
+
+    effects_cpu_load_all(buffer + len, sizeof(buffer) - len);
+
+    protocol_response(buffer, proto);
+}
+
 #ifndef SKIP_READLINE
 static void load_cb(proto_t *proto)
 {
@@ -702,6 +714,7 @@ static int mod_host_init(jack_client_t* client, int socket_port, int feedback_po
     protocol_add_command(HMI_MAP, hmi_map_cb);
     protocol_add_command(HMI_UNMAP, hmi_unmap_cb);
     protocol_add_command(CPU_LOAD, cpu_load_cb);
+    protocol_add_command(CPU_LOAD_ALL, cpu_load_all_cb);
 #ifndef SKIP_READLINE
     protocol_add_command(LOAD_COMMANDS, load_cb);
     protocol_add_command(SAVE_COMMANDS, save_cb);

@@ -224,6 +224,13 @@ The commands supported by mod-host are:
     cpu_load
         * return current jack cpu load
 
+    cpu_load_all
+        * return per-plugin cpu usage as "<instance_number>:<percent>" pairs
+        * percent is of one core, measured since the previous call to this command
+        * this is cpu time, not jack dsp load: the two diverge by however parallel
+          the pedalboard graph is
+        e.g.: resp 0 3:12.6 4:7.3 79:19.0
+
     load <file_name>
         * load a history command file
         * dummy way to save/load workspace state

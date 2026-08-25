@@ -58,6 +58,12 @@ $(PROG): $(OBJ)
 rtmempool-test: rtmempool-test.c ../src/rtmempool/*
 	$(CC) $< $(CFLAGS) $(LDFLAGS) -lrt -lpthread -o $@
 
+cpuload-test: cpuload-test.c
+	$(CC) $< -O2 -Wall -Wextra -std=gnu99 -D_GNU_SOURCE -lpthread -o $@
+
+cpuload-run: cpuload-test
+	./$<
+
 rtmempool-run: rtmempool-test
 	valgrind --leak-check=full --show-reachable=yes ./$<
 
@@ -67,4 +73,4 @@ rtmempool-run: rtmempool-test
 
 # clean rule
 clean:
-	$(RM) $(SRC_DIR)/*.o $(PROG)
+	$(RM) $(SRC_DIR)/*.o $(PROG) cpuload-test
