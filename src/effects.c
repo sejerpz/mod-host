@@ -2645,12 +2645,16 @@ static int ProcessPlugin(jack_nframes_t nframes, void *arg)
 
         if (cpu_load > effect->cpu_load)
         {
-            effect->cpu_load = cpu_load;
-
             postponed_event_list_data* const posteventptr = rtsafe_memory_pool_allocate_atomic(g_rtsafe_mem_pool);
 
             if (posteventptr != NULL)
             {
+                // Only raise the record once we know we can report it. Raising it first
+                // loses the reading whenever the pool is momentarily empty, and because
+                // the record has already moved, nothing lower will ever report again --
+                // the plugin goes quiet for good.
+                effect->cpu_load = cpu_load;
+
                 posteventptr->event.type = POSTPONED_CPU_MONITOR;
                 posteventptr->event.cpu_monitor.effect_id = effect->instance;
                 posteventptr->event.cpu_monitor.cpu_load  = cpu_load * 0.001;
