@@ -6434,11 +6434,13 @@ static void effects_remove_inner_pre(int effect_id)
 
         for (int j = MAX_MIDI_CC_ASSIGN, unused = ASSIGNMENT_NULL; --j >= 0;)
         {
+            #ifdef _DARKGLASS_PABLITO
             if (g_midi_cc_list[j].effect_id >= MAX_PLUGIN_INSTANCES && g_midi_cc_list[j].effect_id < MAX_INSTANCES)
             {
                 unused = ASSIGNMENT_UNUSED;
                 continue;
             }
+            #endif
             g_midi_cc_list[j].channel = -1;
             g_midi_cc_list[j].controller = 0;
             g_midi_cc_list[j].minimum = 0.0f;
@@ -6446,6 +6448,7 @@ static void effects_remove_inner_pre(int effect_id)
             g_midi_cc_list[j].effect_id = unused;
             g_midi_cc_list[j].symbol = NULL;
             g_midi_cc_list[j].port = NULL;
+            g_midi_cc_list[j].midiOutValue = -1;
         }
 
 #ifdef HAVE_CONTROLCHAIN
