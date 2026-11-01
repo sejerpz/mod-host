@@ -96,6 +96,7 @@ typedef unsigned int uint;
 #include "lv2/control-port-state-update.h"
 #include "lv2/kxstudio-properties.h"
 #include "lv2/lv2-hmi.h"
+#include "lv2/alabs-hmi-widgets.h"
 #include "lv2/mod-license.h"
 
 // do not enable external-ui support in embed targets
@@ -279,6 +280,7 @@ enum {
     OPTIONS_FEATURE,
 #ifdef MOD_HMI_CONTROL_ENABLED
     HMI_WC_FEATURE,
+    HMI_WD_FEATURE,
 #endif
     LICENSE_FEATURE,
     BUF_SIZE_POWER2_FEATURE,
@@ -456,6 +458,7 @@ typedef struct EFFECT_T {
     const LV2_State_Interface *state_iface;
 #ifdef __MOD_DEVICES__
     const LV2_HMI_PluginNotification *hmi_notif;
+    const ALABS_HMI_WidgetNotification *hmi_widget_notif;
 #endif
 
     jack_ringbuffer_t *events_in_buffer;
@@ -513,6 +516,7 @@ typedef struct LILV_NODES_T {
     LilvNode *event;
     LilvNode *freeWheeling;
     LilvNode *hmi_interface;
+    LilvNode *hmi_widget_interface;
     LilvNode *input;
     LilvNode *integer;
     LilvNode *is_live;
@@ -621,6 +625,16 @@ typedef struct HMI_ADDRESSING_T {
     uint8_t page;
     uint8_t subpage;
 } hmi_addressing_t;
+
+// A plugin widget visible on the HMI, between hmi_widget_show and hmi_widget_hide.
+// The slots are never freed, only marked unused with area_id -1, so a plugin calling draw_bitmap with a
+// handle that was just hidden finds an unused slot and draws nothing.
+typedef struct HMI_WIDGET_T {
+    int area_id;
+    int effect_id;
+    uint16_t width, height;
+    ALABS_HMI_PixelFormat format;
+} hmi_widget_t;
 #endif
 
 typedef struct SYNC_SCHEDULED_PARAM_T {
@@ -848,6 +862,7 @@ static lilv_nodes_t g_lilv_nodes;
 static urids_t g_urids;
 #ifdef MOD_HMI_CONTROL_ENABLED
 static LV2_HMI_WidgetControl g_hmi_wc;
+static ALABS_HMI_WidgetDraw g_hmi_wd;
 #endif
 static MOD_License_Feature g_license;
 static LV2_Atom_Forge g_lv2_atom_forge;
@@ -878,6 +893,7 @@ static LV2_Feature g_buf_size_features[3] = {
 };
 #ifdef MOD_HMI_CONTROL_ENABLED
 static LV2_Feature g_hmi_wc_feature = { LV2_HMI__WidgetControl, &g_hmi_wc };
+static LV2_Feature g_hmi_wd_feature = { ALABS_HMI__WidgetDraw, &g_hmi_wd };
 #endif
 static LV2_Feature g_license_feature = { MOD_LICENSE__feature, &g_license };
 static LV2_Feature g_lv2_log_feature = { LV2_LOG__log, &g_lv2_log };
@@ -911,6 +927,8 @@ static sys_serial_shm_data* g_hmi_data;
 static ZixThread g_hmi_client_thread;
 static pthread_mutex_t g_hmi_mutex;
 static hmi_addressing_t g_hmi_addressings[MAX_HMI_ADDRESSINGS];
+static hmi_widget_t g_hmi_widgets[MAX_HMI_WIDGETS];
+static int g_hmi_widgets_next;
 #endif
 
 /* internal processing */
@@ -996,6 +1014,13 @@ static void HMIWidgetsPopupMessage(LV2_HMI_WidgetControl_Handle handle,
                                    LV2_HMI_Popup_Style style,
                                    const char* title,
                                    const char* text);
+static void HMIWidgetsDrawBitmap(ALABS_HMI_WidgetDraw_Handle handle,
+                                 ALABS_HMI_Widget widget,
+                                 uint16_t x,
+                                 uint16_t y,
+                                 uint16_t width,
+                                 uint16_t height,
+                                 const uint8_t* bits);
 #endif
 static char *GetLicenseFile(MOD_License_Handle handle, const char *license_uri);
 static int LogPrintf(LV2_Log_Handle handle, LV2_URID type, const char *fmt, ...);
@@ -3658,6 +3683,7 @@ static void GetFeatures(effect_t *effect)
     features[OPTIONS_FEATURE]           = &g_options_feature;
 #ifdef MOD_HMI_CONTROL_ENABLED
     features[HMI_WC_FEATURE]            = &g_hmi_wc_feature;
+    features[HMI_WD_FEATURE]            = &g_hmi_wd_feature;
 #endif
     features[LICENSE_FEATURE]           = &g_license_feature;
     features[BUF_SIZE_POWER2_FEATURE]   = &g_buf_size_features[0];
@@ -4156,6 +4182,88 @@ static void HMIWidgetsPopupMessage(LV2_HMI_WidgetControl_Handle handle,
 
     pthread_mutex_lock(&g_hmi_mutex);
     sys_serial_write(&g_hmi_data->server, sys_serial_event_type_popup, page, subpage, msg);
+    pthread_mutex_unlock(&g_hmi_mutex);
+}
+
+static void HMIWidgetsDrawBitmap(ALABS_HMI_WidgetDraw_Handle handle,
+                                 ALABS_HMI_Widget widget_ptr,
+                                 uint16_t x,
+                                 uint16_t y,
+                                 uint16_t width,
+                                 uint16_t height,
+                                 const uint8_t* bits)
+{
+    if (handle == NULL || widget_ptr == NULL || g_hmi_data == NULL) {
+        return;
+    }
+
+    const hmi_widget_t *widget = (const hmi_widget_t*)widget_ptr;
+
+    const int area_id = widget->area_id;
+
+    // hidden, the plugin should have stopped drawing
+    if (area_id == -1)
+        return;
+
+    if (width == 0 || height == 0 || x >= widget->width || y >= widget->height)
+        return;
+
+    // clip to the area here, it saves the bytes to the HMI. Rows start at x whatever it is,
+    // so clipping on the right is only a matter of sending fewer bytes of each row.
+    const uint16_t clip_width = width < widget->width - x ? width : widget->width - x;
+    const uint16_t clip_height = height < widget->height - y ? height : widget->height - y;
+
+    // how many bytes a row of so many pixels takes in the format of the area
+    #define ROW_BYTES(w) (widget->format == ALABS_HMI_PixelFormat_Gray4  ? ((size_t)(w) + 1) / 2 : \
+                          widget->format == ALABS_HMI_PixelFormat_RGB565 ? (size_t)(w) * 2 :       \
+                          widget->format == ALABS_HMI_PixelFormat_RGB888 ? (size_t)(w) * 3 :       \
+                                                                         ((size_t)(w) + 7) / 8)
+
+    if (g_verbose_debug) {
+        printf("DEBUG: HMIWidgetsDrawBitmap %i: %u %u %u %u %s\n",
+               area_id, x, y, clip_width, clip_height, bits != NULL ? "bitmap" : "clear");
+        fflush(stdout);
+    }
+
+    // the whole 128x64 mono display in hex, plus the header; larger bitmaps are refused below
+    char msg[2 * 1024 + 64];
+    int len = snprintf(msg, sizeof(msg), "%i %u %u %u %u", area_id, x, y, clip_width, clip_height);
+
+    if (bits != NULL)
+    {
+        const size_t src_stride = ROW_BYTES(width);
+        const size_t dst_stride = ROW_BYTES(clip_width);
+
+        if (len + 1 + dst_stride * 2 * clip_height >= sizeof(msg))
+        {
+            fprintf(stderr, "HMIWidgetsDrawBitmap: bitmap too large\n");
+            return;
+        }
+
+        static const char hexdigits[] = "0123456789abcdef";
+
+        msg[len++] = ' ';
+
+        for (uint16_t row = 0; row < clip_height; ++row)
+        {
+            const uint8_t *src = bits + src_stride * row;
+
+            for (size_t i = 0; i < dst_stride; ++i)
+            {
+                msg[len++] = hexdigits[src[i] >> 4];
+                msg[len++] = hexdigits[src[i] & 0xf];
+            }
+        }
+
+        msg[len] = '\0';
+    }
+
+    #undef ROW_BYTES
+
+    pthread_mutex_lock(&g_hmi_mutex);
+    sys_serial_write(&g_hmi_data->server,
+                     bits != NULL ? sys_serial_event_type_widget_bitmap : sys_serial_event_type_widget_clear,
+                     0, 0, msg);
     pthread_mutex_unlock(&g_hmi_mutex);
 }
 
@@ -4890,6 +4998,7 @@ int effects_init(void* client)
     g_lilv_nodes.event = lilv_new_uri(g_lv2_data, LILV_URI_EVENT_PORT);
     g_lilv_nodes.freeWheeling = lilv_new_uri(g_lv2_data, LV2_CORE__freeWheeling);
     g_lilv_nodes.hmi_interface = lilv_new_uri(g_lv2_data, LV2_HMI__PluginNotification);
+    g_lilv_nodes.hmi_widget_interface = lilv_new_uri(g_lv2_data, ALABS_HMI__WidgetNotification);
     g_lilv_nodes.input = lilv_new_uri(g_lv2_data, LILV_URI_INPUT_PORT);
     g_lilv_nodes.integer = lilv_new_uri(g_lv2_data, LV2_CORE__integer);
     g_lilv_nodes.license_interface = lilv_new_uri(g_lv2_data, MOD_LICENSE__interface);
@@ -5070,24 +5179,32 @@ int effects_init(void* client)
     g_hmi_wc.set_indicator           = HMIWidgetsSetIndicator;
     g_hmi_wc.popup_message           = HMIWidgetsPopupMessage;
 
+    g_hmi_wd.size                    = sizeof(g_hmi_wd);
+    g_hmi_wd.draw_bitmap             = HMIWidgetsDrawBitmap;
+
     if (client != NULL)
     {
         // HMI integration setup
         if (sys_serial_open(&g_hmi_shmfd, &g_hmi_data))
         {
             g_hmi_wc.handle = g_hmi_data;
+            g_hmi_wd.handle = g_hmi_data;
             sys_serial_write(&g_hmi_data->server, sys_serial_event_type_special_req, 0, 0, "restart");
             zix_thread_create(&g_hmi_client_thread, 0, HMIClientThread, &g_hmi_data->client);
         }
         else
         {
             g_hmi_wc.handle = NULL;
+            g_hmi_wd.handle = NULL;
             fprintf(stderr, "sys_host HMI setup failed\n");
         }
     }
 
     for (int i = 0; i < MAX_HMI_ADDRESSINGS; i++)
         g_hmi_addressings[i].actuator_id = -1;
+
+    for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+        g_hmi_widgets[i].area_id = -1;
 #endif
 
 #ifdef MOD_IO_PROCESSING_ENABLED
@@ -5264,6 +5381,7 @@ int effects_finish(int close_client)
     lilv_node_free(g_lilv_nodes.event);
     lilv_node_free(g_lilv_nodes.freeWheeling);
     lilv_node_free(g_lilv_nodes.hmi_interface);
+    lilv_node_free(g_lilv_nodes.hmi_widget_interface);
     lilv_node_free(g_lilv_nodes.input);
     lilv_node_free(g_lilv_nodes.integer);
     lilv_node_free(g_lilv_nodes.license_interface);
@@ -5522,6 +5640,16 @@ int effects_add(const char *uri, int instance, int activate)
         effect->hmi_notif =
             (const LV2_HMI_PluginNotification*) lilv_instance_get_extension_data(effect->lilv_instance,
                                                                                  LV2_HMI__PluginNotification);
+    }
+
+    if (lilv_plugin_has_extension_data(effect->lilv_plugin, g_lilv_nodes.hmi_widget_interface))
+    {
+        const ALABS_HMI_WidgetNotification *widget_notif =
+            (const ALABS_HMI_WidgetNotification*) lilv_instance_get_extension_data(effect->lilv_instance,
+                                                                                 ALABS_HMI__WidgetNotification);
+
+        if (widget_notif != NULL && widget_notif->size >= ALABS_HMI_WIDGETNOTIFICATION_SIZE_BASE)
+            effect->hmi_widget_notif = widget_notif;
     }
 #endif
 
@@ -6490,6 +6618,9 @@ static void effects_remove_inner_pre(int effect_id)
         for (int i = 0; i < MAX_HMI_ADDRESSINGS; i++)
             g_hmi_addressings[i].actuator_id = -1;
 
+        for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+            g_hmi_widgets[i].area_id = -1;
+
         if (g_hmi_data != NULL)
         {
             pthread_mutex_lock(&g_hmi_mutex);
@@ -6609,6 +6740,15 @@ static void effects_remove_inner_pre(int effect_id)
 static void effects_remove_inner_loop(int effect_id)
 {
     effect_t *effect = &g_effects[effect_id];
+
+#ifdef MOD_HMI_CONTROL_ENABLED
+    // the plugin is going away, there is nobody left to tell
+    for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+    {
+        if (g_hmi_widgets[i].area_id != -1 && g_hmi_widgets[i].effect_id == effect_id)
+            g_hmi_widgets[i].area_id = -1;
+    }
+#endif
 
 #ifdef WITH_EXTERNAL_UI_SUPPORT
     if (effect->ui_libhandle != NULL)
@@ -9088,6 +9228,106 @@ int effects_hmi_unmap(int effect_id, const char *control_symbol)
 #endif
 }
 
+int effects_hmi_widget_show(int effect_id, const char *widget_symbol, int area_id, int width, int height, int format)
+{
+#ifdef MOD_HMI_CONTROL_ENABLED
+    if (!InstanceExist(effect_id))
+        return ERR_INSTANCE_NON_EXISTS;
+    if (area_id < 0 || width <= 0 || width > 0xffff || height <= 0 || height > 0xffff)
+        return ERR_ASSIGNMENT_INVALID_OP;
+    if (format < ALABS_HMI_PixelFormat_Mono1 || format > ALABS_HMI_PixelFormat_RGB888)
+        return ERR_ASSIGNMENT_INVALID_OP;
+
+    effect_t *effect = &(g_effects[effect_id]);
+
+    if (effect->hmi_widget_notif == NULL)
+        return ERR_ASSIGNMENT_UNUSED;
+
+    for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+    {
+        if (g_hmi_widgets[i].area_id == area_id)
+            return ERR_ASSIGNMENT_ALREADY_EXISTS;
+    }
+
+    // find an unused slot, starting after the last one taken so a handle just hidden is not reused at once
+    hmi_widget_t *widget = NULL;
+
+    for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+    {
+        const int index = (g_hmi_widgets_next + i) % MAX_HMI_WIDGETS;
+
+        if (g_hmi_widgets[index].area_id == -1)
+        {
+            widget = &g_hmi_widgets[index];
+            g_hmi_widgets_next = (index + 1) % MAX_HMI_WIDGETS;
+            break;
+        }
+    }
+
+    if (widget == NULL)
+        return ERR_ASSIGNMENT_LIST_FULL;
+
+    widget->effect_id = effect_id;
+    widget->width = width;
+    widget->height = height;
+    widget->format = (ALABS_HMI_PixelFormat)format;
+    widget->area_id = area_id;
+
+    const ALABS_HMI_WidgetArea area = {
+        .size = sizeof(ALABS_HMI_WidgetArea),
+        .width = width,
+        .height = height,
+        .pixelFormat = (ALABS_HMI_PixelFormat)format,
+    };
+    effect->hmi_widget_notif->widget_shown(lilv_instance_get_handle(effect->lilv_instance),
+                                           widget_symbol, (ALABS_HMI_Widget)widget, &area);
+
+    return SUCCESS;
+#else
+    return ERR_HMI_UNAVAILABLE;
+
+    UNUSED_PARAM(effect_id);
+    UNUSED_PARAM(widget_symbol);
+    UNUSED_PARAM(area_id);
+    UNUSED_PARAM(width);
+    UNUSED_PARAM(height);
+    UNUSED_PARAM(format);
+#endif
+}
+
+int effects_hmi_widget_hide(int area_id)
+{
+#ifdef MOD_HMI_CONTROL_ENABLED
+    int resp = area_id == -1 ? SUCCESS : ERR_ASSIGNMENT_INVALID_OP;
+
+    for (int i = 0; i < MAX_HMI_WIDGETS; i++)
+    {
+        hmi_widget_t *widget = &g_hmi_widgets[i];
+
+        if (widget->area_id == -1 || (area_id != -1 && widget->area_id != area_id))
+            continue;
+
+        if (InstanceExist(widget->effect_id))
+        {
+            effect_t *effect = &(g_effects[widget->effect_id]);
+
+            if (effect->hmi_widget_notif != NULL)
+                effect->hmi_widget_notif->widget_hidden(lilv_instance_get_handle(effect->lilv_instance),
+                                                        (ALABS_HMI_Widget)widget);
+        }
+
+        widget->area_id = -1;
+        resp = SUCCESS;
+    }
+
+    return resp;
+#else
+    return ERR_HMI_UNAVAILABLE;
+
+    UNUSED_PARAM(area_id);
+#endif
+}
+
 float effects_jack_cpu_load(void)
 {
     return jack_cpu_load(g_jack_global_client);
@@ -9213,6 +9453,7 @@ int effects_state_load(const char *dir)
         &g_options_feature,
 #ifdef MOD_HMI_CONTROL_ENABLED
         &g_hmi_wc_feature,
+        &g_hmi_wd_feature,
 #endif
         &g_license_feature,
         &g_buf_size_features[0],
@@ -9308,6 +9549,7 @@ int effects_state_save(const char *dir)
         &g_options_feature,
 #ifdef MOD_HMI_CONTROL_ENABLED
         &g_hmi_wc_feature,
+        &g_hmi_wd_feature,
 #endif
         &g_license_feature,
         &g_buf_size_features[0],

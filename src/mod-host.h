@@ -91,6 +91,8 @@
 #define CV_UNMAP                "cv_unmap %i %s"
 #define HMI_MAP                 "hmi_map %i %s %i %i %i %i %i %s %f %f %i"
 #define HMI_UNMAP               "hmi_unmap %i %s"
+#define HMI_WIDGET_SHOW         "hmi_widget_show %i %s %i %i %i %i"
+#define HMI_WIDGET_HIDE         "hmi_widget_hide %i"
 #define CPU_LOAD                "cpu_load"
 #define MAX_CPU_LOAD            "max_cpu_load"
 #define LOAD_COMMANDS           "load %s"
