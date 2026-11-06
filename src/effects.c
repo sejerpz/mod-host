@@ -162,6 +162,10 @@ typedef struct {
 #if defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF)
 #define MOD_HMI_CONTROL_ENABLED
 #define MOD_IO_PROCESSING_ENABLED
+#elif defined(MOD_HMI_EMULATOR)
+// a desktop build talking to mod-hw-emulator, which stands in for mod-system-control: the HMI control
+// (labels, leds, plugin widgets through /sys_msgs) without the audio processing of a device
+#define MOD_HMI_CONTROL_ENABLED
 #endif
 
 #ifdef _DARKGLASS_DEVICE_PABLITO
@@ -456,7 +460,7 @@ typedef struct EFFECT_T {
     const MOD_License_Interface *license_iface;
     const LV2_Options_Interface *options_interface;
     const LV2_State_Interface *state_iface;
-#ifdef __MOD_DEVICES__
+#if defined(__MOD_DEVICES__) || defined(MOD_HMI_EMULATOR)
     const LV2_HMI_PluginNotification *hmi_notif;
     const ALABS_HMI_WidgetNotification *hmi_widget_notif;
 #endif
@@ -5634,7 +5638,7 @@ int effects_add(const char *uri, int instance, int activate)
         }
     }
 
-#ifdef __MOD_DEVICES__
+#if defined(__MOD_DEVICES__) || defined(MOD_HMI_EMULATOR)
     if (lilv_plugin_has_extension_data(effect->lilv_plugin, g_lilv_nodes.hmi_interface))
     {
         effect->hmi_notif =

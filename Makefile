@@ -21,6 +21,11 @@ CFLAGS += -O3 -Wall -Wextra -c -std=gnu99 -fPIC -D_GNU_SOURCE -pthread
 CFLAGS += -Wno-deprecated-declarations
 CFLAGS += -Werror=implicit-function-declaration -Werror=return-type
 
+# HMI control on a desktop build, with mod-hw-emulator in place of mod-system-control
+ifeq ($(MOD_HMI_EMULATOR),1)
+CFLAGS += -DMOD_HMI_EMULATOR
+endif
+
 # debug mode compiler and linker flags
 ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g -Wall -Wextra -c -DDEBUG
