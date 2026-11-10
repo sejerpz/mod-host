@@ -62,6 +62,11 @@ else
 LIBS += $(shell pkg-config --libs jack)
 endif
 
+# on Windows the HMI messages go over TCP (src/sys_serial_tcp.h)
+ifeq ($(MOD_HMI_EMULATOR)$(WINDOWS),1true)
+LIBS += -lws2_32
+endif
+
 # include paths
 INCS = $(shell pkg-config --cflags jack lilv-0)
 
