@@ -270,7 +270,12 @@ uint64_t time_ns_get()
     return r * _cntfrq_ratio;
 #else
     struct timespec time;
+#ifdef CLOCK_MONOTONIC_RAW
     clock_gettime(CLOCK_MONOTONIC_RAW, &time);
+#else
+    // Windows (winpthreads) has no raw clock
+    clock_gettime(CLOCK_MONOTONIC, &time);
+#endif
     return (uint64_t) time.tv_sec * 1e9 + (uint64_t) time.tv_nsec;
 #endif
 }
