@@ -19,6 +19,11 @@
 #include <unistd.h>
 #endif
 
+// macOS cannot lock a mapping in memory with mmap
+#ifndef MAP_LOCKED
+#define MAP_LOCKED 0
+#endif
+
 // must be 8192 - sizeof sys_serial_shm_data members, so we cleanly align to 64bits
 #define SYS_SERIAL_SHM_DATA_SIZE (8192 - sizeof(sem_t) - sizeof(uint32_t)*2)
 
