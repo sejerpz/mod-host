@@ -574,6 +574,25 @@ static void hmi_unmap_cb(proto_t *proto)
     protocol_response_int(resp, proto);
 }
 
+static void hmi_widget_show_cb(proto_t *proto)
+{
+    int resp;
+    resp = effects_hmi_widget_show(atoi(proto->list[1]),  // effect_id
+                                        proto->list[2],   // widget_symbol
+                                   atoi(proto->list[3]),  // area_id
+                                   atoi(proto->list[4]),  // width
+                                   atoi(proto->list[5]),  // height
+                                   atoi(proto->list[6])); // format
+    protocol_response_int(resp, proto);
+}
+
+static void hmi_widget_hide_cb(proto_t *proto)
+{
+    int resp;
+    resp = effects_hmi_widget_hide(atoi(proto->list[1]));
+    protocol_response_int(resp, proto);
+}
+
 static void cpu_load_cb(proto_t *proto)
 {
     float value = effects_jack_cpu_load();
@@ -1110,6 +1129,8 @@ static int mod_host_init(jack_client_t* client, int socket_port, int feedback_po
     protocol_add_command(CV_UNMAP, cv_unmap_cb);
     protocol_add_command(HMI_MAP, hmi_map_cb);
     protocol_add_command(HMI_UNMAP, hmi_unmap_cb);
+    protocol_add_command(HMI_WIDGET_SHOW, hmi_widget_show_cb);
+    protocol_add_command(HMI_WIDGET_HIDE, hmi_widget_hide_cb);
     protocol_add_command(CPU_LOAD, cpu_load_cb);
     protocol_add_command(MAX_CPU_LOAD, max_cpu_load_cb);
 #ifndef SKIP_READLINE

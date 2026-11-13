@@ -14,8 +14,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
+
+// macOS cannot lock a mapping in memory with mmap
+#ifndef MAP_LOCKED
+#define MAP_LOCKED 0
+#endif
 
 // must be 8192 - sizeof sys_serial_shm_data members, so we cleanly align to 64bits
 #define SYS_SERIAL_SHM_DATA_SIZE (8192 - sizeof(sem_t) - sizeof(uint32_t)*2)
@@ -33,6 +40,8 @@ typedef enum {
     sys_serial_event_type_unit = 0x80 + 'u',
     sys_serial_event_type_widget_indicator = 0x80 + 'i',
     sys_serial_event_type_popup = 0x80 + 'p',
+    sys_serial_event_type_widget_bitmap = 0x80 + 'w',
+    sys_serial_event_type_widget_clear = 0x80 + 'k',
     // server -> client
     sys_serial_event_type_compressor_mode = 0x80 + 'm',
     sys_serial_event_type_compressor_release = 0x80 + 'r',
@@ -55,9 +64,21 @@ typedef struct {
     sys_serial_shm_data_channel server, client;
 } sys_serial_shm_data;
 
+// the same over TCP, see there
+#include "sys_serial_tcp.h"
+
 static inline
 bool sys_serial_open(int* shmfd, sys_serial_shm_data** data)
 {
+    {
+        char host[256], port[16];
+        if (sys_serial_tcp_address(host, port))
+            return sys_serial_tcp_open(shmfd, data, host, port);
+    }
+
+#ifdef _WIN32
+    return false;
+#else
     int fd;
 #ifdef SERVER_MODE
     sem_t sem_server, sem_client;
@@ -137,11 +158,19 @@ cleanup:
     *shmfd = 0;
     *data = NULL;
     return false;
+#endif // _WIN32
 }
 
 static inline
 void sys_serial_close(int shmfd, sys_serial_shm_data* data)
 {
+    if (shmfd == SYS_SERIAL_TCP_FD)
+    {
+        sys_serial_tcp_close(data);
+        return;
+    }
+
+#ifndef _WIN32
 #ifdef SERVER_MODE
     sem_destroy(&data->server.sem);
     sem_destroy(&data->client.sem);
@@ -152,6 +181,7 @@ void sys_serial_close(int shmfd, sys_serial_shm_data* data)
 #ifdef SERVER_MODE
     shm_unlink(SYS_SERIAL_SHM);
 #endif
+#endif // _WIN32
 }
 
 // server, read must only be a result of a semaphore post action
@@ -185,6 +215,8 @@ bool sys_serial_read(sys_serial_shm_data_channel* const data,
     case sys_serial_event_type_unit:
     case sys_serial_event_type_widget_indicator:
     case sys_serial_event_type_popup:
+    case sys_serial_event_type_widget_bitmap:
+    case sys_serial_event_type_widget_clear:
         break;
 #else
     case sys_serial_event_type_compressor_mode:

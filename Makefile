@@ -21,6 +21,11 @@ CFLAGS += -O3 -Wall -Wextra -c -std=gnu99 -fPIC -D_GNU_SOURCE -pthread
 CFLAGS += -Wno-deprecated-declarations
 CFLAGS += -Werror=implicit-function-declaration -Werror=return-type
 
+# HMI control on a desktop build, with mod-hw-emulator in place of mod-system-control
+ifeq ($(MOD_HMI_EMULATOR),1)
+CFLAGS += -DMOD_HMI_EMULATOR
+endif
+
 # debug mode compiler and linker flags
 ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g -Wall -Wextra -c -DDEBUG
@@ -55,6 +60,11 @@ LIBS += -Wl,-rpath,'$$ORIGIN/..'
 endif
 else
 LIBS += $(shell pkg-config --libs jack)
+endif
+
+# on Windows the HMI messages go over TCP (src/sys_serial_tcp.h)
+ifeq ($(MOD_HMI_EMULATOR)$(WINDOWS),1true)
+LIBS += -lws2_32
 endif
 
 # include paths
