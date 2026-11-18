@@ -162,6 +162,10 @@ typedef struct {
 #if defined(_MOD_DEVICE_DUOX) || defined(_MOD_DEVICE_DWARF)
 #define MOD_HMI_CONTROL_ENABLED
 #define MOD_IO_PROCESSING_ENABLED
+#elif defined(_MOD_DEVICE_DUO)
+// the Starless Duo has a system line to the HMI too (mod-system-control on the A20's UART4, Itead boards):
+// the HMI control and the plugin widgets, none of the audio processing of the newer devices
+#define MOD_HMI_CONTROL_ENABLED
 #elif defined(MOD_HMI_EMULATOR)
 // a desktop build talking to mod-hw-emulator, which stands in for mod-system-control: the HMI control
 // (labels, leds, plugin widgets through /sys_msgs) without the audio processing of a device
