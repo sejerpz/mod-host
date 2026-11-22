@@ -22,6 +22,7 @@
 ************************************************************************************************************************
 */
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,7 @@ typedef struct MONITOR_CLIENT_T {
     jack_client_t *client;
     jack_port_t **in_ports;
     jack_port_t **out_ports;
+    sem_t wait_proc_sem;
     sem_t wait_volume_sem;
     uint64_t connected;
     uint32_t numports;
@@ -89,7 +91,7 @@ typedef struct MONITOR_CLIENT_T {
     bool apply_compressor;
     bool apply_volume, apply_smoothing;
     bool muted;
-    bool wait_volume;
+    atomic_bool wait_proc, wait_volume;
 } monitor_client_t;
 
 /*
@@ -296,6 +298,12 @@ static int ProcessMonitor(jack_nframes_t nframes, void *arg)
         for (uint32_t i=0; i < mon->numports; ++i)
             memset(jack_port_get_buffer(mon->out_ports[i], nframes), 0, sizeof(float)*nframes);
 
+        if (atomic_exchange(&mon->wait_proc, false))
+            sem_post(&mon->wait_proc_sem);
+
+        if (atomic_exchange(&mon->wait_volume, false))
+            sem_post(&mon->wait_volume_sem);
+
         return 0;
     }
 
@@ -360,14 +368,20 @@ static int ProcessMonitor(jack_nframes_t nframes, void *arg)
     }
   #endif
 
+    // we use `floats_differ_enough` here as a safe `!=` float value comparison
     mon->apply_volume = floats_differ_enough(smooth_volume, 1.0f);
     mon->smooth_volume = smooth_volume;
     mon->muted = smooth_volume <= db2lin(MOD_MONITOR_VOLUME_MUTE) ||
                ! floats_differ_enough(smooth_volume, db2lin(MOD_MONITOR_VOLUME_MUTE));
 
-    if (mon->wait_volume && fabsf(volume - smooth_volume) < 0.000001f)
+    if (atomic_exchange(&mon->wait_proc, false))
+        sem_post(&mon->wait_proc_sem);
+
+    // now we manually specify a very low value instead of using `floats_differ_enough`
+    // due to smooth filtering the final value is never reached
+    if (atomic_load(&mon->wait_volume) && fabsf(volume - smooth_volume) < 0.000001f)
     {
-        mon->wait_volume = false;
+        atomic_store(&mon->wait_volume, false);
         sem_post(&mon->wait_volume_sem);
     }
 
@@ -498,6 +512,10 @@ int jack_initialize(jack_client_t* client, const char* load_init)
         jack_port_tie(mon->in_ports[i], mon->out_ports[i]);
     }
 
+    atomic_init(&mon->wait_proc, false);
+    atomic_init(&mon->wait_volume, false);
+
+    sem_init(&mon->wait_proc_sem, 0, 0);
     sem_init(&mon->wait_volume_sem, 0, 0);
 
     /* Set jack callbacks */
@@ -508,6 +526,7 @@ int jack_initialize(jack_client_t* client, const char* load_init)
     if (jack_activate(client) != 0)
     {
         fprintf(stderr, "can't activate jack client\n");
+        sem_destroy(&mon->wait_proc_sem);
         sem_destroy(&mon->wait_volume_sem);
         free(mon);
         return 1;
@@ -578,6 +597,7 @@ void jack_finish(void* arg)
     monitor_client_t *const mon = arg;
 
     jack_deactivate(mon->client);
+    sem_destroy(&mon->wait_proc_sem);
     sem_destroy(&mon->wait_volume_sem);
 
     g_monitor_handle = NULL;
@@ -704,6 +724,8 @@ bool monitor_client_setup_volume(float volume)
     mon->step_volume = step_volume;
     mon->apply_volume = apply_volume;
 
+    atomic_thread_fence(memory_order_seq_cst);
+
     if (unmute)
         mon->muted = false;
 
@@ -724,6 +746,20 @@ bool monitor_client_flush_volume(void)
     return true;
 }
 
+bool monitor_client_wait_proc(void)
+{
+    monitor_client_t *const mon = g_monitor_handle;
+
+    if (!mon)
+    {
+        fprintf(stderr, "asked to wait for proc while monitor client is not active\n");
+        return false;
+    }
+
+    atomic_store(&mon->wait_proc, true);
+    return sem_timedwait_secs(&mon->wait_proc_sem, 1) == 0;
+}
+
 bool monitor_client_wait_volume(void)
 {
     monitor_client_t *const mon = g_monitor_handle;
@@ -734,6 +770,6 @@ bool monitor_client_wait_volume(void)
         return false;
     }
 
-    mon->wait_volume = true;
+    atomic_store(&mon->wait_volume, true);
     return sem_timedwait_secs(&mon->wait_volume_sem, 1) == 0;
 }
